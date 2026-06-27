@@ -1,0 +1,13 @@
+Package: treeringr
+Type: Package
+Title: Tree Ring Data Downloader, Parser, and Visualizer
+Version: 0.1.0
+Authors@R: person("Sergey", "Mikhaylov", role = c("aut", "cre"), email = "sergey@example.com")
+Description: Download tree-ring measurement files from the NOAA ITRDB
+    (International Tree-Ring Data Bank), parse them into clean metadata
+    and measurement tables, and produce visualizations including spaghetti
+    plots, mean chronologies, and site maps.
+Imports: dplR (>= 1.7.9), dplyr, tidyr, stringr, ggplot2, rvest, httr, tools, curl, duckdb, DBI, parallel
+Depends: R (>= 3.5.0)
+License: GPL-2
+Encoding: UTF-8
