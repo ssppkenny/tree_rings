@@ -487,12 +487,10 @@ extract_sites <- function(dir, rwl_list = NULL) {
     if (!is.null(rwl_list) && base_name %in% names(rwl_list)) {
       rwl <- rwl_list[[base_name]]
     } else if (file.exists(f) && file.info(f)$size > 0) {
-      rwl <- suppressMessages(suppressWarnings(
-        tryCatch(
-          read.tucson(f),
-          error = function(e) tryCatch(read.tucson(f, long = TRUE), error = function(e2) NULL)
-        )
-      ))
+      rwl <- tryCatch(
+        read.tucson(f),
+        error = function(e) tryCatch(read.tucson(f, long = TRUE), error = function(e2) NULL)
+      )
     } else {
       rwl <- NULL
     }

@@ -69,9 +69,9 @@ parse_to_duckdb <- function(dir, db_path = "treerings.duckdb",
       noaa_file <- sub("\\.rwl$", "-noaa.rwl", f)
 
       rwl <- tryCatch(
-        suppressMessages(suppressWarnings(read.tucson(f))),
+        read.tucson(f),
         error = function(e) tryCatch(
-          suppressMessages(suppressWarnings(read.tucson(f, long = TRUE))),
+          read.tucson(f, long = TRUE),
           error = function(e2) NULL
         )
       )

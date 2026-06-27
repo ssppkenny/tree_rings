@@ -1,0 +1,298 @@
+---
+title: "Using treeringr"
+author: "treeringr"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Using treeringr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+## Introduction
+
+`treeringr` downloads tree-ring measurement files from the NOAA International
+Tree-Ring Data Bank (ITRDB), parses them into a clean DuckDB database, and
+provides functions for querying and visualizing the data.
+
+The workflow is:
+
+1. **Download** `.rwl` files from NOAA ITRDB
+2. **Parse** into DuckDB (parallel, with automatic outlier correction)
+3. **Query** sites, chronologies, and measurements
+4. **Plot** spaghetti plots, mean chronologies, and site maps
+
+---
+
+## 1. Installation
+
+```{r, eval=FALSE}
+devtools::install("/path/to/treeringr")
+library(treeringr)
+```
+
+---
+
+## 2. Downloading data
+
+```{r, eval=FALSE}
+download_treerings(dest_dir = "treerings")
+```
+
+This downloads all `.rwl` files from the ITRDB into subdirectories mirroring
+the server layout:
+
+```
+treerings/
+├── africa/
+├── asia/
+├── europe/
+├── northamerica/
+│   ├── canada/
+│   ├── mexico/
+│   └── usa/
+├── southamerica/
+├── australia/
+├── atlantic/
+└── centralamerica/
+```
+
+Existing files are skipped, so re-running is safe for incremental updates.
+
+---
+
+## 3. Parsing into DuckDB
+
+```{r, eval=FALSE}
+parse_to_duckdb(dir = "treerings", db_path = "treerings.duckdb")
+```
+
+This reads all `.rwl` files in parallel (using `parallel::mclapply` with 7 cores),
+extracts site metadata from the file headers, detects and corrects decimal-point
+outliers, and stores everything in a DuckDB database.
+
+### What happens during parsing
+
+For each file:
+
+1. **Read** with `read.tucson()` — handles Tucson format with header detection
+2. **Extract metadata** — site name, species, lat, lon, elevation, continent
+3. **Fix outliers** — values > Q3 + 10×IQR and > 5mm are corrected by dividing
+   by 10 if the corrected value falls within a plausible range
+4. **Store** — long-format measurements and sites metadata written to DuckDB
+
+### Database schema
+
+```{r, eval=FALSE}
+con <- connect_treerings("treerings.duckdb")
+DBI::dbListTables(con)
+```
+
+**`sites`** table:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `site_id` | VARCHAR | ITRDB site code (e.g. `alge001`) |
+| `site_name` | VARCHAR | Full site name from NOAA metadata |
+| `species` | VARCHAR | Scientific species name |
+| `species_code` | VARCHAR | 4-letter code (e.g. `CDAT`) |
+| `lat` | DOUBLE | Latitude in decimal degrees |
+| `lon` | DOUBLE | Longitude in decimal degrees |
+| `elevation` | DOUBLE | Elevation in meters |
+| `continent` | VARCHAR | Continent directory |
+| `n_cores` | INTEGER | Number of cores at site |
+| `min_year` | INTEGER | Earliest year |
+| `max_year` | INTEGER | Most recent year |
+
+**`measurements`** table:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `site_id` | VARCHAR | ITRDB site code |
+| `core_id` | VARCHAR | Unique core identifier |
+| `year` | INTEGER | Year of measurement |
+| `ring_width` | DOUBLE | Ring width in mm |
+
+---
+
+## 4. Exploring sites
+
+### Query sites from DuckDB
+
+```{r, eval=FALSE}
+con <- connect_treerings("treerings.duckdb")
+
+# All sites in Europe
+europe <- query_sites(con, continent = "europe")
+
+# Specific sites
+sites <- query_sites(con, site_ids = c("alge001", "chin005"))
+
+# All sites with their continents
+by_cont <- DBI::dbGetQuery(con, "
+  SELECT continent, COUNT(*) AS n
+  FROM sites GROUP BY continent ORDER BY n DESC
+")
+```
+
+```{r, echo=FALSE}
+knitr::kable(data.frame(
+  continent = c("northamerica", "europe", "asia", "southamerica",
+                "australia", "africa", "centralamerica", "atlantic"),
+  sites = c(4564, 3187, 1812, 297, 238, 139, 8, 1)
+))
+```
+
+### Extract sites from files (alternative)
+
+```{r, eval=FALSE}
+sites <- extract_sites("treerings")
+```
+
+This reads metadata directly from the `.rwl` headers without DuckDB.
+Useful if you haven't built the database yet.
+
+---
+
+## 5. Querying measurements
+
+### Mean chronology
+
+```{r, eval=FALSE}
+chron <- query_chronology(con, "alge001")
+head(chron)
+```
+
+Returns: `site_id`, `year`, `mean_width`, `sd_width`, `n_cores`.
+
+### Wide format (years as columns)
+
+```{r, eval=FALSE}
+wide <- query_wide(con, "alge001")
+```
+
+Each row is a core, each year is a column. Only years with actual data
+are included — no empty columns.
+
+### Long format
+
+```{r, eval=FALSE}
+years <- DBI::dbGetQuery(con, "
+  SELECT site_id, core_id, year, ring_width
+  FROM measurements
+  WHERE site_id = 'alge001'
+")
+```
+
+### Custom SQL queries
+
+```{r, eval=FALSE}
+# 10 longest chronologies
+DBI::dbGetQuery(con, "
+  SELECT site_id, max_year - min_year + 1 AS span
+  FROM sites
+  ORDER BY span DESC
+  LIMIT 10
+")
+```
+
+---
+
+## 6. Visualizing
+
+### Spaghetti plot — all cores overlaid
+
+```{r spaghetti, eval=FALSE}
+plot_spaghetti("alge001", "treerings")
+```
+
+Each line is one core from the site. Outliers are automatically fixed
+by default (`fix = TRUE`).
+
+### Mean chronology
+
+```{r chronology, eval=FALSE}
+plot_chronology("alge001", "treerings")
+```
+
+Dark line is the mean ring width per year. Grey ribbon is ±1 standard
+deviation.
+
+### Site map
+
+```{r sitemap, eval=FALSE}
+sites <- extract_sites("treerings")
+plot_site_map(sites)
+```
+
+Points are colored by species, sized by number of cores.
+
+---
+
+## 7. Outlier correction
+
+During parsing, `fix_outliers()` automatically corrects decimal-point
+data-entry errors. The algorithm:
+
+1. Per core, compute Q1, Q3, and IQR
+2. Flag values > Q3 + 10×IQR **and** > 5mm
+3. Divide by 10 (the most common error: decimal shift)
+4. Accept correction only if the adjusted value falls within
+   median ± 3×IQR
+
+You can also fix outliers manually:
+
+```{r, eval=FALSE}
+rwl <- dplR::read.tucson("treerings/africa/alge001.rwl")
+rwl_fixed <- fix_outliers(rwl, quiet = FALSE)
+```
+
+### Verification
+
+```{r, eval=FALSE}
+con <- connect_treerings("treerings.duckdb")
+
+# Count outliers found across all data
+DBI::dbGetQuery(con, "
+  SELECT COUNT(*) AS n FROM (
+    SELECT m.ring_width, cs.q3, cs.q3 - cs.q1 AS iqr
+    FROM measurements m
+    JOIN (
+      SELECT site_id, core_id,
+        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY ring_width) AS q1,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY ring_width) AS q3,
+        MEDIAN(ring_width) AS med
+      FROM measurements WHERE ring_width > 0 AND ring_width < 200
+      GROUP BY site_id, core_id
+    ) cs ON m.site_id = cs.site_id AND m.core_id = cs.core_id
+    WHERE m.ring_width > cs.q3 + 10 * (cs.q3 - cs.q1)
+      AND m.ring_width > 5 AND m.ring_width < 200
+      AND m.ring_width / 10 >= cs.med - 3 * (cs.q3 - cs.q1)
+      AND m.ring_width / 10 <= cs.med + 3 * (cs.q3 - cs.q1)
+  )
+")
+```
+
+---
+
+## 8. Data quality summary
+
+| Metric | Value |
+|--------|-------|
+| Total sites | 10,375 |
+| Valid coordinates | 10,246 (98.8%) |
+| Bad coordinates | 0 |
+| Total cores | 380,630 |
+| Total measurements | 72,562,372 |
+| Year range | 6000 BC – 2024 AD |
+| Decimal outliers corrected | 2,381 |
+| Outlier rate | 0.003% |
+| Database size | 2.1 GB |
+
+---
+
+## 9. Session info
+
+```{r session, eval=FALSE}
+sessionInfo()
+```
