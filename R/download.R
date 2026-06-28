@@ -95,7 +95,6 @@ download_treerings <- function(url = "https://www.ncei.noaa.gov/pub/data/paleo/t
   # Download in batches to avoid overwhelming the server
   batch_size <- 500L
   total_ok <- 0L
-  pending <- seq_along(all_src)
   remaining <- data.frame(src = all_src, dest = all_dest, stringsAsFactors = FALSE)
 
   while (nrow(remaining) > 0) {
@@ -110,8 +109,8 @@ download_treerings <- function(url = "https://www.ncei.noaa.gov/pub/data/paleo/t
         next
       }
     }
-    cat("Downloading batch", batch_idx[1], "-", tail(batch_idx, 1),
-        "of", length(all_src), "...\n")
+    cat("[", total_ok, "/", length(all_src), "] Downloading",
+        nrow(batch), "files...\n")
 
     res <- multi_download(
       urls = batch$src,
@@ -119,22 +118,23 @@ download_treerings <- function(url = "https://www.ncei.noaa.gov/pub/data/paleo/t
       timeout = timeout
     )
 
+    # Remove successfully downloaded files from remaining
     ok <- which(res$status_code >= 200 & res$status_code < 400)
     total_ok <- total_ok + length(ok)
-    cat("  OK:", length(ok), "\n")
+    cat("  OK:", length(ok), "| Downloaded:", total_ok, "/", length(all_src), "\n")
 
-    # Keep failed files for retry
+    if (length(ok) > 0) {
+      ok_global <- batch_idx[ok]
+      remaining <- remaining[-ok_global, , drop = FALSE]
+    }
+    # Remove zero-byte files from failed downloads
     failed_idx <- which(!(res$status_code >= 200 & res$status_code < 400) |
                          is.na(res$status_code))
-    dir_idx <- dir.exists(batch$dest[failed_idx])
-    if (length(failed_idx) > 0) {
-      remaining <- remaining[batch_idx[failed_idx[!dir_idx]], , drop = FALSE]
-      cat("  Retrying", nrow(remaining), "files...\n")
-      # Also remove zero-byte files from failed downloads
-      for (zf in batch$dest[failed_idx]) {
-        if (file.exists(zf) && file.info(zf)$size == 0) file.remove(zf)
-      }
-    } else {
+    for (zf in batch$dest[failed_idx]) {
+      if (file.exists(zf) && file.info(zf)$size == 0) file.remove(zf)
+    }
+    # If nothing in this batch succeeded, remove it to avoid infinite loop
+    if (length(ok) == 0 && nrow(batch) > 0) {
       remaining <- remaining[-batch_idx, , drop = FALSE]
     }
   }

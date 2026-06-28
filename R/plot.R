@@ -142,9 +142,14 @@ plot_chronology <- function(site_name, dir, fix = TRUE, ...) {
 #' Plot a map of all sites
 #'
 #' Creates a map showing all sites as points colored by species with
-#' size proportional to number of cores.
+#' size proportional to number of cores. When \code{continent} is specified,
+#' sites are filtered to that continent and a geographic map background
+#' is added using the \code{maps} package (must be installed separately).
 #'
-#' @param sites Data.frame. A sites table from \code{extract_sites()}.
+#' @param sites Data.frame. A sites table from \code{extract_sites()} or
+#'   \code{query_sites()}.
+#' @param continent Character. Optional continent name to filter and zoom
+#'   (e.g. \code{"europe"}). Case-insensitive.
 #' @param ... Additional arguments passed to \code{ggplot2::labs()}.
 #'
 #' @return A \code{ggplot} object.
@@ -154,16 +159,157 @@ plot_chronology <- function(site_name, dir, fix = TRUE, ...) {
 #' \dontrun{
 #' sites <- extract_sites("treerings")
 #' plot_site_map(sites)
+#' plot_site_map(sites, continent = "europe")
 #' }
-plot_site_map <- function(sites, ...) {
+plot_site_map <- function(sites, continent = NULL, ...) {
   sites <- sites[!is.na(sites$lat) & !is.na(sites$lon), ]
 
-  p <- ggplot(sites, aes(x = lon, y = lat, color = species, size = n_cores)) +
-    geom_point(alpha = 0.7) +
+  if (!is.null(continent)) {
+    sites <- sites[tolower(sites$continent) == tolower(continent), ]
+    if (nrow(sites) == 0) stop("No sites found for continent: ", continent)
+  }
+
+  p <- ggplot(sites, aes(x = lon, y = lat, color = species, size = n_cores))
+
+  if (!is.null(continent)) {
+    world <- if (requireNamespace("maps", quietly = TRUE)) {
+      tryCatch(ggplot2::map_data("world"), error = function(e) NULL)
+    } else NULL
+    if (!is.null(world)) {
+      p <- p + geom_polygon(data = world,
+                             aes(x = long, y = lat, group = group),
+                             fill = "gray90", color = "gray50",
+                             linewidth = 0.2, inherit.aes = FALSE)
+    }
+  }
+
+  n_species <- length(unique(sites$species))
+  legend_cols <- if (n_species > 20) ceiling(sqrt(n_species)) else 1
+
+  p <- p + geom_point(alpha = 0.7) +
+    scale_size_area(max_size = 3) +
+    guides(color = guide_legend(ncol = legend_cols,
+                                override.aes = list(size = 2, alpha = 1)),
+           size = guide_legend(override.aes = list(alpha = 1))) +
     labs(x = "Longitude", y = "Latitude",
-         title = "Tree Ring Sites",
+         title = if (!is.null(continent)) paste0(continent, " Tree Ring Sites")
+                 else "Tree Ring Sites",
          subtitle = paste(nrow(sites), "sites"), ...) +
-    theme_minimal()
+    theme_minimal() +
+    theme(legend.position = "bottom", legend.text = element_text(size = 7))
+
+  if (!is.null(continent)) {
+    x_pad <- max(diff(range(sites$lon, na.rm = TRUE)) * 0.1, 1)
+    y_pad <- max(diff(range(sites$lat, na.rm = TRUE)) * 0.1, 1)
+    p <- p + coord_quickmap(
+      xlim = range(sites$lon, na.rm = TRUE) + c(-x_pad, x_pad),
+      ylim = range(sites$lat, na.rm = TRUE) + c(-y_pad, y_pad)
+    )
+  }
+
+  p
+}
+
+
+#' Plot concentric tree rings for a single core
+#'
+#' Creates a cross-section-style plot showing the tree rings of a single
+#' core as concentric circles. Each ring's radius is proportional to the
+#' cumulative ring width from the center outward.
+#'
+#' Data can come from a DuckDB connection (preferred) or from a directory
+#' of .rwl files. If both \code{con} and \code{dir} are provided,
+#' \code{con} takes precedence.
+#'
+#' @param site_name Character. The site ID.
+#' @param con A DuckDB connection from \code{connect_treerings()}. If
+#'   provided, data is queried from the database.
+#' @param dir Character. Path to directory containing .rwl files. Used
+#'   as fallback when \code{con} is NULL.
+#' @param core_id Character. Optional core column name. If NULL, uses the
+#'   first core found for the site.
+#' @param ... Additional arguments passed to \code{ggplot2::labs()}.
+#'
+#' @return A \code{ggplot} object.
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' # From DuckDB
+#' con <- connect_treerings("treerings.duckdb")
+#' plot_rings("alge001", con = con)
+#'
+#' # From files
+#' plot_rings("alge001", dir = "treerings")
+#' }
+plot_rings <- function(site_name, con = NULL, dir = NULL, core_id = NULL, ...) {
+  if (!is.null(con)) {
+    cores <- DBI::dbGetQuery(con, paste0(
+      "SELECT DISTINCT core_id FROM measurements WHERE site_id = '",
+      site_name, "' ORDER BY core_id"
+    ))$core_id
+    if (length(cores) == 0) stop("Site '", site_name, "' not found in database")
+    if (is.null(core_id)) core_id <- cores[1]
+    if (!core_id %in% cores) stop("Core '", core_id, "' not found for site ", site_name)
+    meas <- DBI::dbGetQuery(con, paste0(
+      "SELECT year, ring_width FROM measurements WHERE core_id = '",
+      core_id, "' ORDER BY year"
+    ))
+    vals <- meas$ring_width
+    years <- meas$year
+  } else if (!is.null(dir)) {
+    f <- list.files(dir, pattern = paste0(site_name, ".rwl$"),
+                    full.names = TRUE, recursive = TRUE)
+    if (length(f) == 0) stop("File not found: ", site_name, ".rwl in ", dir)
+    f <- f[!grepl("-noaa.rwl$", f)][1]
+    rwl <- tryCatch(
+      read.tucson(f),
+      error = function(e) tryCatch(read.tucson(f, long = TRUE), error = function(e2) NULL)
+    )
+    if (is.null(rwl)) stop("Failed to read: ", f)
+    if (is.null(core_id)) core_id <- colnames(rwl)[1]
+    if (!core_id %in% colnames(rwl)) stop("Core '", core_id, "' not found in ", site_name)
+    vals <- rwl[[core_id]]
+    years <- as.integer(rownames(rwl))
+    vals[vals %in% c(999, -999, 9990, -9990)] <- NA
+  } else {
+    stop("Provide either a DuckDB connection (con) or a data directory (dir)")
+  }
+
+  ok <- !is.na(vals) & vals > 0
+  if (sum(ok) < 2) stop("Not enough valid measurements for core: ", core_id)
+  vals <- vals[ok]
+  years <- years[ok]
+
+  radii <- cumsum(vals)
+  n_rings <- length(radii)
+  n_pts <- 200
+  theta <- seq(0, 2 * pi, length.out = n_pts)
+
+  ring_list <- list()
+  for (i in seq_len(n_rings)) {
+    r_outer <- radii[i]
+    r_inner <- if (i == 1) 0 else radii[i - 1]
+    ring_list[[i]] <- data.frame(
+      x = c(r_outer * cos(theta), r_inner * rev(cos(theta))),
+      y = c(r_outer * sin(theta), r_inner * rev(sin(theta))),
+      ring = i,
+      year = years[i]
+    )
+  }
+  rings <- do.call(rbind, ring_list)
+
+  p <- ggplot(rings, aes(x = x, y = y)) +
+    geom_polygon(aes(fill = ring %% 2 == 0, group = ring), color = NA) +
+    scale_fill_manual(values = c("TRUE" = "#8B7355", "FALSE" = "#D2B48C"),
+                      guide = "none") +
+    coord_fixed() +
+    labs(title = paste0(site_name, " (", core_id, ")"),
+         subtitle = paste(years[1], "-", years[n_rings], " | ", n_rings, " rings"),
+         ...) +
+    theme_void() +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
 
   p
 }

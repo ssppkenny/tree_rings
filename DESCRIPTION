@@ -8,7 +8,7 @@ Description: Download tree-ring measurement files from the NOAA ITRDB
     and measurement tables, and produce visualizations including spaghetti
     plots, mean chronologies, and site maps.
 Imports: dplR (>= 1.7.9), dplyr, tidyr, stringr, ggplot2, rvest, httr, tools, curl, duckdb, DBI, parallel
-Suggests: knitr, rmarkdown
+Suggests: knitr, rmarkdown, maps
 VignetteBuilder: knitr
 Depends: R (>= 3.5.0)
 License: GPL-2

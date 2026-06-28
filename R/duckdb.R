@@ -6,7 +6,7 @@
 #'
 #' The database contains two tables:
 #' \describe{
-#'   \item{\code{sites}}{Site metadata — site_id, species, lat, lon, elevation, continent, n_cores, year range}
+#'   \item{\code{sites}}{Site metadata — site_id, species, lat, lon, elevation, continent, country, n_cores, year range}
 #'   \item{\code{measurements}}{Long-format ring widths — site_id, core_id, year, ring_width}
 #' }
 #'
@@ -57,7 +57,8 @@ parse_to_duckdb <- function(dir, db_path = "treerings.duckdb",
     DBI::dbExecute(con, "CREATE TABLE sites (
       site_id VARCHAR PRIMARY KEY, site_name VARCHAR, species VARCHAR,
       species_code VARCHAR, lat DOUBLE, lon DOUBLE, elevation DOUBLE,
-      continent VARCHAR, n_cores INTEGER, min_year INTEGER, max_year INTEGER
+      continent VARCHAR, country VARCHAR, n_cores INTEGER,
+      min_year INTEGER, max_year INTEGER
     )")
 
     site_rows <- list()
@@ -114,6 +115,15 @@ parse_to_duckdb <- function(dir, db_path = "treerings.duckdb",
       n_cores <- ncol(rwl)
       continent <- file_continent(f, dir)
 
+      country <- file_country(f, dir)
+      if (is.na(country) && !is.na(lat) && !is.na(lon)) {
+        if (requireNamespace("maps", quietly = TRUE)) {
+          ctry <- tryCatch(maps::map.where("world", lon, lat),
+                           error = function(e) NA_character_)
+          if (!is.na(ctry)) country <- sub(":.*$", "", ctry)
+        }
+      }
+
       # Build measurements in long format
       for (core in colnames(rwl)) {
         vals <- rwl[[core]]
@@ -133,7 +143,7 @@ parse_to_duckdb <- function(dir, db_path = "treerings.duckdb",
         site_id = base_name, site_name = site_name,
         species = species, species_code = species_code,
         lat = lat, lon = lon, elevation = elevation,
-        continent = continent,
+        continent = continent, country = country,
         n_cores = n_cores, min_year = min(years), max_year = max(years),
         stringsAsFactors = FALSE
       )
@@ -162,6 +172,7 @@ parse_to_duckdb <- function(dir, db_path = "treerings.duckdb",
 
   # Merge all worker databases into the main one
   if (!quiet) cat("Merging worker databases...\n")
+  if (file.exists(db_path)) file.remove(db_path)
   main_con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
 
   DBI::dbExecute(main_con, "CREATE TABLE measurements (
@@ -170,7 +181,8 @@ parse_to_duckdb <- function(dir, db_path = "treerings.duckdb",
   DBI::dbExecute(main_con, "CREATE TABLE sites (
     site_id VARCHAR, site_name VARCHAR, species VARCHAR,
     species_code VARCHAR, lat DOUBLE, lon DOUBLE, elevation DOUBLE,
-    continent VARCHAR, n_cores INTEGER, min_year INTEGER, max_year INTEGER
+    continent VARCHAR, country VARCHAR, n_cores INTEGER,
+    min_year INTEGER, max_year INTEGER
   )")
 
   for (wb in results) {
@@ -291,11 +303,14 @@ query_wide <- function(con, site_ids = NULL) {
 
 #' Query site metadata from DuckDB
 #'
-#' Returns the sites table, optionally filtered by site IDs and/or continent.
+#' Returns the sites table, optionally filtered by site IDs, continent,
+#' and/or country.
 #'
 #' @param con A DuckDB connection from \code{connect_treerings()}.
 #' @param site_ids Character vector of site IDs. If NULL, all sites.
 #' @param continent Character. Filter by continent. If NULL, all continents.
+#' @param country Character. Filter by country (case-sensitive, matches the
+#'   \code{country} column). If NULL, all countries.
 #' @return A data.frame with site metadata.
 #' @export
 #'
@@ -303,9 +318,10 @@ query_wide <- function(con, site_ids = NULL) {
 #' \dontrun{
 #' con <- connect_treerings("treerings.duckdb")
 #' sites <- query_sites(con, continent = "europe")
+#' sites <- query_sites(con, country = "France")
 #' DBI::dbDisconnect(con, shutdown = TRUE)
 #' }
-query_sites <- function(con, site_ids = NULL, continent = NULL) {
+query_sites <- function(con, site_ids = NULL, continent = NULL, country = NULL) {
   sql <- "SELECT * FROM sites"
   filters <- c()
   if (!is.null(site_ids)) {
@@ -315,9 +331,55 @@ query_sites <- function(con, site_ids = NULL, continent = NULL) {
   if (!is.null(continent)) {
     filters <- c(filters, paste0("continent = '", continent, "'"))
   }
+  if (!is.null(country)) {
+    filters <- c(filters, paste0("country = '", country, "'"))
+  }
   if (length(filters) > 0) {
     sql <- paste0(sql, " WHERE ", paste(filters, collapse = " AND "))
   }
-  sql <- paste0(sql, " ORDER BY site_id")
+    sql <- paste0(sql, " ORDER BY site_id")
   DBI::dbGetQuery(con, sql)
+}
+
+
+#' Find sites by country name via reverse-geocoding
+#'
+#' Takes a sites data.frame (from \code{extract_sites()} or
+#' \code{query_sites()}) and filters rows to those within the given
+#' country by reverse-geocoding latitude/longitude coordinates.
+#' Requires the \code{maps} package.
+#'
+#' @param sites Data.frame with \code{lat} and \code{lon} columns.
+#' @param country_name Character. Country name to match (case-insensitive).
+#'   Can be a partial match or full name (e.g. \code{"France"},
+#'   \code{"france"}).
+#' @return A data.frame filtered to sites in the given country, with an
+#'   added \code{country} column.
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' con <- connect_treerings("treerings.duckdb")
+#' sites <- query_sites(con)
+#' france <- find_sites_by_country(sites, "France")
+#' }
+find_sites_by_country <- function(sites, country_name) {
+  if (!requireNamespace("maps", quietly = TRUE)) {
+    stop("Package 'maps' is required for reverse-geocoding. ",
+         "Install with: install.packages(\"maps\")")
+  }
+  ok <- !is.na(sites$lat) & !is.na(sites$lon)
+  if (sum(ok) == 0) {
+    stop("No sites with valid lat/lon coordinates")
+  }
+  countries <- maps::map.where("world", sites$lon[ok], sites$lat[ok])
+  countries <- sub(":.*$", "", as.character(countries))
+  sites$country <- NA_character_
+  sites$country[ok] <- countries
+  idx <- which(tolower(sites$country[ok]) == tolower(country_name))
+  if (sum(idx) == 0) {
+    warning("No sites found for country: ", country_name)
+    return(sites[0, , drop = FALSE])
+  }
+  sites[ok, , drop = FALSE][idx, , drop = FALSE]
 }

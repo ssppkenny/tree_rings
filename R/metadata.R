@@ -437,6 +437,23 @@ file_continent <- function(file_path, base_dir) {
 }
 
 
+#' Extract country from a file path
+#'
+#' The second directory component of the file path relative to the base
+#' directory is used as the country name, if present.  E.g. for
+#' \code{northamerica/canada/cana001.rwl} the country is \code{canada}.
+#'
+#' @param file_path Character. Full path to a .rwl file.
+#' @param base_dir Character. Base data directory.
+#' @return Character. Country name, or NA if the path has no country
+#'   subdirectory.
+file_country <- function(file_path, base_dir) {
+  rel <- sub(paste0("^", base_dir, "/?"), "", file_path)
+  parts <- str_split(rel, "/")[[1]]
+  if (length(parts) > 2) parts[2] else NA_character_
+}
+
+
 #' Extract site metadata from .rwl files
 #'
 #' Reads all .rwl files in a directory and builds a metadata table.
@@ -449,7 +466,8 @@ file_continent <- function(file_path, base_dir) {
 #' @return A \code{data.frame} with columns:
 #'   \code{site_id}, \code{site_name}, \code{species}, \code{species_code},
 #'   \code{lat}, \code{lon}, \code{elevation}, \code{continent},
-#'   \code{n_cores}, \code{min_year}, \code{max_year}, \code{filename}.
+#'   \code{country}, \code{n_cores}, \code{min_year}, \code{max_year},
+#'   \code{filename}.
 #' @export
 #'
 #' @examples
@@ -500,7 +518,7 @@ extract_sites <- function(dir, rwl_list = NULL) {
         site_id = base_name, site_name = NA_character_,
         species = NA_character_, species_code = NA_character_,
         lat = NA_real_, lon = NA_real_, elevation = NA_real_,
-        continent = NA_character_,
+        continent = NA_character_, country = NA_character_,
         n_cores = NA_integer_, min_year = NA_integer_, max_year = NA_integer_,
         filename = base_name, stringsAsFactors = FALSE
       )
@@ -539,6 +557,7 @@ extract_sites <- function(dir, rwl_list = NULL) {
       if (is.na(elevation)) elevation <- hdr$elevation
     }
 
+    country <- file_country(f, dir)
     rows[[base_name]] <- data.frame(
       site_id = site_id,
       site_name = site_name,
@@ -548,6 +567,7 @@ extract_sites <- function(dir, rwl_list = NULL) {
       lon = lon,
       elevation = elevation,
       continent = file_continent(f, dir),
+      country = country,
       n_cores = n_cores,
       min_year = min_year,
       max_year = max_year,
@@ -556,5 +576,16 @@ extract_sites <- function(dir, rwl_list = NULL) {
     )
   }
 
-  bind_rows(rows)
+  result <- bind_rows(rows)
+
+  # Reverse-geocode missing countries from lat/lon
+  na_geo <- which(is.na(result$country) & !is.na(result$lat) & !is.na(result$lon))
+  if (length(na_geo) > 0 && requireNamespace("maps", quietly = TRUE)) {
+    countries <- maps::map.where("world", result$lon[na_geo], result$lat[na_geo])
+    countries <- sub(":.*$", "", as.character(countries))
+    result$country[na_geo] <- countries
+    # Clean up map.where() artifacts ("USA" -> "United States"? no, keep as-is for now)
+  }
+
+  result
 }
