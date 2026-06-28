@@ -100,6 +100,7 @@ DBI::dbListTables(con)
 | `lon` | DOUBLE | Longitude in decimal degrees |
 | `elevation` | DOUBLE | Elevation in meters |
 | `continent` | VARCHAR | Continent directory |
+| `country` | VARCHAR | Country (from file path or reverse-geocoded) |
 | `n_cores` | INTEGER | Number of cores at site |
 | `min_year` | INTEGER | Earliest year |
 | `max_year` | INTEGER | Most recent year |
@@ -125,8 +126,15 @@ con <- connect_treerings("treerings.duckdb")
 # All sites in Europe
 europe <- query_sites(con, continent = "europe")
 
+# Sites in a specific country (uses country column in DB)
+france <- query_sites(con, country = "France")
+
 # Specific sites
 sites <- query_sites(con, site_ids = c("alge001", "chin005"))
+
+# Reverse-geocode any sites table to find by country
+all_sites <- query_sites(con)
+fr <- find_sites_by_country(all_sites, "France")
 
 # All sites with their continents
 by_cont <- DBI::dbGetQuery(con, "
@@ -226,6 +234,30 @@ plot_site_map(sites)
 ```
 
 Points are colored by species, sized by number of cores.
+
+```{r sitemap_continent, eval=FALSE}
+# Continent-filtered with geographic map background
+con <- connect_treerings("treerings.duckdb")
+sites <- query_sites(con)
+plot_site_map(sites, continent = "europe")
+```
+
+When `continent` is specified, the plot zooms to that region and adds country
+outlines from the `maps` package (must be installed).
+
+### Concentric tree rings
+
+```{r rings, eval=FALSE}
+# From DuckDB (preferred)
+con <- connect_treerings("treerings.duckdb")
+plot_rings("alge001", con = con)
+
+# From files
+plot_rings("alge001", dir = "treerings")
+```
+
+Each ring represents one year; the radius is the cumulative ring width from
+the center outward. Alternating fills simulate the look of a tree cross-section.
 
 ---
 
